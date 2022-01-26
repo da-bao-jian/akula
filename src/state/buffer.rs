@@ -1,5 +1,6 @@
 use crate::{
-    accessors, h256_to_u256,
+    accessors::{self, state::PlainState},
+    h256_to_u256,
     kv::{
         tables::{self, AccountChange, StorageChange, StorageChangeKey},
         traits::*,
@@ -103,7 +104,8 @@ where
             return Ok(*account);
         }
 
-        accessors::state::account::read(self.txn, address, self.historical_block).await
+        accessors::state::account::read::<_, PlainState>(self.txn, address, self.historical_block)
+            .await
     }
 
     async fn read_code(&self, code_hash: H256) -> anyhow::Result<Bytes> {
@@ -128,7 +130,13 @@ where
             }
         }
 
-        accessors::state::storage::read(self.txn, address, location, self.historical_block).await
+        accessors::state::storage::read::<_, PlainState>(
+            self.txn,
+            address,
+            location,
+            self.historical_block,
+        )
+        .await
     }
 
     async fn erase_storage(&mut self, address: Address) -> anyhow::Result<()> {

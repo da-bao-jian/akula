@@ -1,4 +1,7 @@
-use akula::{binutil::AkulaDataDir, kv::traits::*, models::*, stagedsync::stages::*};
+use akula::{
+    accessors::state::PlainState, binutil::AkulaDataDir, kv::traits::*, models::*,
+    stagedsync::stages::*,
+};
 use async_trait::async_trait;
 use clap::Parser;
 use ethnum::U256;
@@ -44,7 +47,7 @@ where
     }
 
     async fn get_balance(&self, address: Address, block_number: BlockNumber) -> RpcResult<U256> {
-        Ok(akula::accessors::state::account::read(
+        Ok(akula::accessors::state::account::read::<_, PlainState>(
             &self.db.begin().await?,
             address,
             Some(block_number),
