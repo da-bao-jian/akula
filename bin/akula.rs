@@ -48,6 +48,10 @@ pub struct Opt {
     )]
     pub chain_name: String,
 
+    /// Run in compact node: do not store ancient blocks and state beyond the last 1024 blocks.
+    #[clap(long = "compact")]
+    pub compact: bool,
+
     /// Sentry GRPC service URL
     #[clap(
         long = "sentry.api.addr",
