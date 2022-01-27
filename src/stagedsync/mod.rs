@@ -2,7 +2,7 @@ pub mod stage;
 pub mod stages;
 
 use self::stage::{Stage, StageInput, UnwindInput};
-use crate::{kv::traits::*, stagedsync::stage::ExecOutput};
+use crate::{kv::traits::*, models::*, stagedsync::stage::ExecOutput};
 use std::time::{Duration, Instant};
 use tracing::*;
 
@@ -20,6 +20,7 @@ use tracing::*;
 /// If the app is restarted in between stages, it restarts from the first stage. Absent new blocks, already completed stages are skipped.
 pub struct StagedSync<'db, DB: MutableKV> {
     stages: Vec<Box<dyn Stage<'db, DB::MutableTx<'db>>>>,
+    unwind_to: Option<BlockNumber>,
     min_progress_to_commit_after_stage: u64,
 }
 
@@ -33,6 +34,7 @@ impl<'db, DB: MutableKV> StagedSync<'db, DB> {
     pub fn new() -> Self {
         Self {
             stages: Vec::new(),
+            unwind_to: None,
             min_progress_to_commit_after_stage: 0,
         }
     }
@@ -49,6 +51,11 @@ impl<'db, DB: MutableKV> StagedSync<'db, DB> {
         self
     }
 
+    pub fn set_unwind_point(&mut self, v: Option<BlockNumber>) -> &mut Self {
+        self.unwind_to = v;
+        self
+    }
+
     /// Run staged sync loop.
     /// Invokes each loaded stage, and does unwinds if necessary.
     ///
@@ -56,7 +63,7 @@ impl<'db, DB: MutableKV> StagedSync<'db, DB> {
     pub async fn run(&mut self, db: &'db DB) -> anyhow::Result<!> {
         let num_stages = self.stages.len();
 
-        let mut unwind_to = None;
+        let mut unwind_to = self.unwind_to.take();
         'run_loop: loop {
             let mut tx = db.begin_mutable().await?;
 

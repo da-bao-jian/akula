@@ -70,6 +70,10 @@ pub struct Opt {
     #[clap(long)]
     pub max_block: Option<BlockNumber>,
 
+    /// Unwind to.
+    #[clap(long)]
+    pub unwind_to: Option<BlockNumber>,
+
     /// Downloader options.
     #[clap(flatten)]
     pub downloader_opts: akula::downloader::opts::Opts,
@@ -695,6 +699,7 @@ fn main() -> anyhow::Result<()> {
                 // staged sync setup
                 let mut staged_sync = stagedsync::StagedSync::new();
                 staged_sync.set_min_progress_to_commit_after_stage(1024);
+                staged_sync.set_unwind_point(opt.unwind_to);
                 if let Some(erigon_db) = erigon_db.clone() {
                     staged_sync.push(ConvertHeaders {
                         db: erigon_db,
