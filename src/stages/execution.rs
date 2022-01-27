@@ -1,12 +1,11 @@
 use crate::{
-    accessors,
+    accessors::{self, state::StateStorageKind},
     consensus::engine_factory,
     execution::{
         analysis_cache::AnalysisCache,
         processor::ExecutionProcessor,
         tracer::{CallTracer, CallTracerFlags},
     },
-    h256_to_u256,
     kv::{
         tables::{self, CallTraceSetEntry},
         traits::*,
@@ -17,12 +16,14 @@ use crate::{
 };
 use anyhow::{format_err, Context};
 use async_trait::async_trait;
-use std::time::{Duration, Instant};
+use std::{
+    marker::PhantomData,
+    time::{Duration, Instant},
+};
 use tracing::*;
 
-/// Execution of blocks through EVM
 #[derive(Debug)]
-pub struct Execution {
+pub struct ExecutionConfig {
     pub batch_size: u64,
     pub history_batch_size: u64,
     pub exit_after_batch: bool,
@@ -31,8 +32,24 @@ pub struct Execution {
     pub prune_from: BlockNumber,
 }
 
+/// Execution of blocks through EVM
+#[derive(Debug)]
+pub struct Execution<S> {
+    config: ExecutionConfig,
+    _marker: PhantomData<S>,
+}
+
+impl<S> Execution<S> {
+    pub fn new(config: ExecutionConfig) -> Self {
+        Self {
+            config,
+            _marker: PhantomData,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn execute_batch_of_blocks<'db, Tx: MutableTransaction<'db>>(
+async fn execute_batch_of_blocks<'db, Tx, S>(
     tx: &Tx,
     chain_config: ChainSpec,
     max_block: BlockNumber,
@@ -43,8 +60,14 @@ async fn execute_batch_of_blocks<'db, Tx: MutableTransaction<'db>>(
     starting_block: BlockNumber,
     first_started_at: (Instant, Option<BlockNumber>),
     prune_from: BlockNumber,
-) -> anyhow::Result<BlockNumber> {
-    let mut buffer = Buffer::new(tx, prune_from, None);
+) -> anyhow::Result<BlockNumber>
+where
+    Tx: MutableTransaction<'db>,
+    S: StateStorageKind,
+    tables::BitmapKey<S::Address>: TableObject,
+    tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+{
+    let mut buffer = Buffer::<_, S>::new(tx, prune_from, None);
     let mut consensus_engine = engine_factory(chain_config.clone())?;
     let mut analysis_cache = AnalysisCache::default();
 
@@ -183,14 +206,21 @@ async fn execute_batch_of_blocks<'db, Tx: MutableTransaction<'db>>(
 }
 
 #[async_trait]
-impl<'db, RwTx: MutableTransaction<'db>> Stage<'db, RwTx> for Execution {
+impl<'db, Tx, S> Stage<'db, Tx> for Execution<S>
+where
+    Tx: MutableTransaction<'db>,
+    S: StateStorageKind,
+    tables::BitmapKey<S::Address>: TableObject,
+    tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+    tables::StorageChangeKey<S::Address>: TableDecode,
+{
     fn id(&self) -> crate::StageId {
         EXECUTION
     }
 
     async fn execute<'tx>(
         &mut self,
-        tx: &'tx mut RwTx,
+        tx: &'tx mut Tx,
         input: StageInput,
     ) -> anyhow::Result<ExecOutput>
     where
@@ -213,21 +243,21 @@ impl<'db, RwTx: MutableTransaction<'db>> Stage<'db, RwTx> for Execution {
             .previous_stage.ok_or_else(|| format_err!("Execution stage cannot be executed first, but no previous stage progress specified"))?.1;
 
         Ok(if max_block >= starting_block {
-            let executed_to = execute_batch_of_blocks(
+            let executed_to = execute_batch_of_blocks::<Tx, S>(
                 tx,
                 chain_config,
                 max_block,
-                self.batch_size,
-                self.history_batch_size,
-                self.batch_until,
-                self.commit_every,
+                self.config.batch_size,
+                self.config.history_batch_size,
+                self.config.batch_until,
+                self.config.commit_every,
                 starting_block,
                 input.first_started_at,
-                self.prune_from,
+                self.config.prune_from,
             )
             .await?;
 
-            let done = executed_to == max_block || self.exit_after_batch;
+            let done = executed_to == max_block || self.config.exit_after_batch;
 
             ExecOutput::Progress {
                 stage_progress: executed_to,
@@ -243,16 +273,16 @@ impl<'db, RwTx: MutableTransaction<'db>> Stage<'db, RwTx> for Execution {
 
     async fn unwind<'tx>(
         &mut self,
-        tx: &'tx mut RwTx,
+        tx: &'tx mut Tx,
         input: crate::stagedsync::stage::UnwindInput,
     ) -> anyhow::Result<UnwindOutput>
     where
         'db: 'tx,
     {
         info!("Unwinding accounts");
-        let mut account_cursor = tx.mutable_cursor(tables::Account).await?;
+        let mut account_cursor = tx.mutable_cursor(S::account_table()).await?;
 
-        let mut account_cs_cursor = tx.mutable_cursor(tables::AccountChangeSet).await?;
+        let mut account_cs_cursor = tx.mutable_cursor(S::account_change_table()).await?;
 
         while let Some((block_number, tables::AccountChange { address, account })) =
             account_cs_cursor.last().await?
@@ -263,7 +293,7 @@ impl<'db, RwTx: MutableTransaction<'db>> Stage<'db, RwTx> for Execution {
 
             if let Some(account) = account {
                 account_cursor.put(address, account).await?;
-            } else if account_cursor.seek(address).await?.is_some() {
+            } else if account_cursor.seek_exact(address).await?.is_some() {
                 account_cursor.delete_current().await?;
             }
 
@@ -271,9 +301,9 @@ impl<'db, RwTx: MutableTransaction<'db>> Stage<'db, RwTx> for Execution {
         }
 
         info!("Unwinding storage");
-        let mut storage_cursor = tx.mutable_cursor_dupsort(tables::Storage).await?;
+        let mut storage_cursor = tx.mutable_cursor_dupsort(S::storage_table()).await?;
 
-        let mut storage_cs_cursor = tx.mutable_cursor_dupsort(tables::StorageChangeSet).await?;
+        let mut storage_cs_cursor = tx.mutable_cursor_dupsort(S::storage_change_table()).await?;
 
         while let Some((
             tables::StorageChangeKey {
@@ -287,8 +317,7 @@ impl<'db, RwTx: MutableTransaction<'db>> Stage<'db, RwTx> for Execution {
                 break;
             }
 
-            upsert_storage_value(&mut storage_cursor, address, h256_to_u256(location), value)
-                .await?;
+            upsert_storage_value::<_, S>(&mut storage_cursor, address, location, value).await?;
 
             storage_cs_cursor.delete_current().await?;
         }

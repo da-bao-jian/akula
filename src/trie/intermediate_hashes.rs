@@ -1,10 +1,12 @@
 #![allow(clippy::question_mark)]
 use crate::{
-    crypto::keccak256,
+    accessors::state::StateStorageKind,
     etl::collector::{TableCollector, OPTIMAL_BUFFER_CAPACITY},
     kv::{
         tables,
-        traits::{Cursor as _Cursor, CursorDupSort, MutableCursor, MutableTransaction, Table},
+        traits::{
+            Cursor as _Cursor, CursorDupSort, MutableCursor, MutableTransaction, Table, TableObject,
+        },
     },
     models::*,
     trie::{
@@ -488,31 +490,35 @@ where
     Ok(root)
 }
 
-async fn gather_changes<'db, 'tx, Tx>(txn: &'tx Tx, from: BlockNumber) -> Result<PrefixSet>
+async fn gather_changes<'db, 'tx, Tx, S>(txn: &'tx Tx, from: BlockNumber) -> Result<PrefixSet>
 where
     'db: 'tx,
     Tx: MutableTransaction<'db>,
+    S: StateStorageKind,
+    tables::BitmapKey<S::Address>: TableObject,
+    tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+    tables::StorageChangeKey<S::Address>: TableObject,
 {
     let starting_key = from + 1;
 
     let mut out = PrefixSet::new();
 
-    let mut account_changes = txn.cursor_dup_sort(tables::AccountChangeSet).await?;
+    let mut account_changes = txn.cursor_dup_sort(S::account_change_table()).await?;
     let mut data = account_changes.seek(starting_key).await?;
     while data.is_some() {
         let address = data.unwrap().1.address;
-        let hashed_address = keccak256(address);
+        let hashed_address = S::hashed_address_key(address);
         out.insert(unpack_nibbles(hashed_address.as_bytes()).as_slice());
         data = account_changes.next().await?;
     }
 
-    let mut storage_changes = txn.cursor_dup_sort(tables::StorageChangeSet).await?;
+    let mut storage_changes = txn.cursor_dup_sort(S::storage_change_table()).await?;
     let mut data = storage_changes.seek(starting_key).await?;
     while data.is_some() {
         let address = data.as_ref().unwrap().0.address;
         let location = data.as_ref().unwrap().1.location;
-        let hashed_address = keccak256(address);
-        let hashed_location = keccak256(location);
+        let hashed_address = S::hashed_address_key(address);
+        let hashed_location = S::hashed_location_key(location);
 
         let hashed_key = [
             hashed_address.as_bytes(),
@@ -526,7 +532,7 @@ where
     Ok(out)
 }
 
-pub async fn increment_intermediate_hashes<'db, 'tx, Tx>(
+pub async fn increment_intermediate_hashes<'db, 'tx, Tx, S>(
     txn: &'tx Tx,
     etl_dir: &TempDir,
     from: BlockNumber,
@@ -535,8 +541,12 @@ pub async fn increment_intermediate_hashes<'db, 'tx, Tx>(
 where
     'db: 'tx,
     Tx: MutableTransaction<'db>,
+    S: StateStorageKind,
+    tables::BitmapKey<S::Address>: TableObject,
+    tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+    tables::StorageChangeKey<S::Address>: TableObject,
 {
-    let mut changes = gather_changes(txn, from).await?;
+    let mut changes = gather_changes::<Tx, S>(txn, from).await?;
     do_increment_intermediate_hashes(txn, etl_dir, expected_root, &mut changes).await
 }
 
@@ -973,19 +983,23 @@ mod property_test {
         Ok(())
     }
 
-    async fn populate_change_sets<'db, 'tx, Tx>(
+    async fn populate_change_sets<'db, 'tx, Tx, S>(
         tx: &'tx Tx,
         changing_accounts: &BTreeMap<Address, ChangingAccount>,
     ) -> Result<()>
     where
         'db: 'tx,
         Tx: MutableTransaction<'db>,
+        S: StateStorageKind,
+        tables::BitmapKey<S::Address>: TableObject,
+        tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+        tables::StorageChangeKey<S::Address>: TableObject,
     {
-        tx.clear_table(tables::AccountChangeSet).await?;
-        tx.clear_table(tables::StorageChangeSet).await?;
+        tx.clear_table(S::account_change_table()).await?;
+        tx.clear_table(S::storage_change_table()).await?;
 
-        let mut account_cursor = tx.mutable_cursor_dupsort(tables::AccountChangeSet).await?;
-        let mut storage_cursor = tx.mutable_cursor_dupsort(tables::StorageChangeSet).await?;
+        let mut account_cursor = tx.mutable_cursor_dupsort(S::account_change_table()).await?;
+        let mut storage_cursor = tx.mutable_cursor_dupsort(S::storage_change_table()).await?;
 
         for (address, states) in changing_accounts {
             let mut previous: Option<&(Account, Storage)> = None;
@@ -999,7 +1013,7 @@ mod property_test {
                             .upsert(
                                 block_number,
                                 AccountChange {
-                                    address: *address,
+                                    address: S::address_to_key(*address),
                                     account: previous_account,
                                 },
                             )
@@ -1016,10 +1030,10 @@ mod property_test {
                                 .upsert(
                                     StorageChangeKey {
                                         block_number,
-                                        address: *address,
+                                        address: S::address_to_key(*address),
                                     },
                                     StorageChange {
-                                        location: *location,
+                                        location: S::location_to_key(h256_to_u256(*location)),
                                         value: *value,
                                     },
                                 )
@@ -1032,10 +1046,10 @@ mod property_test {
                                 .upsert(
                                     StorageChangeKey {
                                         block_number,
-                                        address: *address,
+                                        address: S::address_to_key(*address),
                                     },
                                     StorageChange {
-                                        location: *location,
+                                        location: S::location_to_key(h256_to_u256(*location)),
                                         value: U256::ZERO,
                                     },
                                 )
@@ -1063,7 +1077,13 @@ mod property_test {
     }
 
     // test
-    async fn do_trie_root_matches(test_data: ChangingAccountsFixture) {
+    async fn do_trie_root_matches<S>(test_data: ChangingAccountsFixture)
+    where
+        S: StateStorageKind,
+        tables::BitmapKey<S::Address>: TableObject,
+        tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+        tables::StorageChangeKey<S::Address>: TableObject,
+    {
         let db = new_mem_database().unwrap();
         let temp_dir = TempDir::new().unwrap();
 
@@ -1089,13 +1109,13 @@ mod property_test {
         populate_hashed_state(&tx, state_after_increment)
             .await
             .unwrap();
-        populate_change_sets(&tx, &test_data.accounts)
+        populate_change_sets::<_, S>(&tx, &test_data.accounts)
             .await
             .unwrap();
         tx.commit().await.unwrap();
 
         let tx = db.begin_mutable().await.unwrap();
-        let root = increment_intermediate_hashes(
+        let root = increment_intermediate_hashes::<_, S>(
             &tx,
             &temp_dir,
             BlockNumber(test_data.before_increment as u64),
@@ -1107,10 +1127,27 @@ mod property_test {
         assert_eq!(root, expected);
     }
 
-    proptest! {
-        #[test]
-        fn trie_root_matches(test_data in test_datas()) {
-            tokio_test::block_on(do_trie_root_matches(test_data));
+    mod plain_state {
+        use super::*;
+        use crate::accessors::state::PlainState;
+
+        proptest! {
+            #[test]
+            fn trie_root_matches(test_data in test_datas()) {
+                tokio_test::block_on(do_trie_root_matches::<PlainState>(test_data));
+            }
+        }
+    }
+
+    mod hashed_state {
+        use super::*;
+        use crate::accessors::state::HashedState;
+
+        proptest! {
+            #[test]
+            fn trie_root_matches(test_data in test_datas()) {
+                tokio_test::block_on(do_trie_root_matches::<HashedState>(test_data));
+            }
         }
     }
 }

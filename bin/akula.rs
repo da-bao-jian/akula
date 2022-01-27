@@ -1,8 +1,10 @@
 use akula::{
+    accessors::state::{HashedState, PlainState},
     binutil::AkulaDataDir,
+    client_id,
     downloader::sentry_status_provider::SentryStatusProvider,
     kv::{
-        tables::{self, ErasedTable},
+        tables::{self, CompactMode, ErasedTable},
         traits::*,
     },
     models::*,
@@ -49,8 +51,12 @@ pub struct Opt {
     pub chain_name: String,
 
     /// Run in compact node: do not store ancient blocks and state beyond the last 1024 blocks.
-    #[clap(long = "compact")]
-    pub compact: bool,
+    #[clap(long = "compact", default_value = "off")]
+    pub compact: CompactMode,
+
+    /// Force overwrite database settings. Only use if you know what you're doing.
+    #[clap(long = "force-overwrite-db-config")]
+    pub force_overwrite_db_config: bool,
 
     /// Sentry GRPC service URL
     #[clap(
@@ -584,7 +590,7 @@ fn main() -> anyhow::Result<()> {
                 .build()?;
 
             rt.block_on(async move {
-                info!("Starting Akula ({})", version_string());
+                info!("Starting Akula ({})", client_id());
 
                 let chains_config = akula::sentry::chain_config::ChainsConfig::new()?;
                 let chain_config = chains_config.get(&opt.chain_name)?;
@@ -612,22 +618,78 @@ fn main() -> anyhow::Result<()> {
                         .context("failed to create ETL temp dir")?,
                 );
                 let db = akula::kv::new_database(&akula_chain_data_dir)?;
-                async {
+                {
                     let txn = db.begin_mutable().await?;
-                    if akula::genesis::initialize_genesis(
-                        &txn,
-                        &*etl_temp_dir,
-                        chain_config.chain_spec().clone(),
-                    )
-                    .await?
-                    {
-                        txn.commit().await?;
+                    let version_string = version_string();
+                    let db_info = txn.get(tables::DbInfo, Default::default()).await?;
+
+                    let expected_db_config = tables::DatabaseConfig {
+                        version_string: version_string.clone(),
+                        compact_mode: opt.compact,
+                    };
+
+                    let mut modified_config = false;
+                    match (db_info, opt.force_overwrite_db_config) {
+                        (Some(db_info), true) => {
+                            warn!(
+                                "Overwriting DB configuration ({:?} => {:?})",
+                                db_info, expected_db_config
+                            );
+                            txn.set(tables::DbInfo, Default::default(), expected_db_config)
+                                .await?;
+                            modified_config = true;
+                        }
+                        (Some(db_info), false) => {
+                            if db_info.version_string != version_string {
+                                bail!(
+                                    "Database version mismatch (Akula: {}, DB: {})",
+                                    version_string,
+                                    db_info.version_string
+                                )
+                            }
+
+                            if db_info.compact_mode != opt.compact {
+                                bail!(
+                                    "Compact mode mismatch (Akula: {:?}, DB: {:?})",
+                                    opt.compact,
+                                    db_info.compact_mode,
+                                )
+                            }
+                        }
+                        (None, _) => {
+                            txn.set(tables::DbInfo, Default::default(), expected_db_config)
+                                .await?;
+                            modified_config = true;
+                        }
                     }
 
-                    Ok::<_, anyhow::Error>(())
+                    let written_genesis = async {
+                        Ok::<_, anyhow::Error>(match opt.compact {
+                            CompactMode::Off | CompactMode::Ultra => {
+                                akula::genesis::initialize_genesis::<_, PlainState>(
+                                    &txn,
+                                    &*etl_temp_dir,
+                                    chain_config.chain_spec().clone(),
+                                )
+                                .await?
+                            }
+                            CompactMode::On => {
+                                akula::genesis::initialize_genesis::<_, HashedState>(
+                                    &txn,
+                                    &*etl_temp_dir,
+                                    chain_config.chain_spec().clone(),
+                                )
+                                .await?
+                            }
+                        })
+                    }
+                    .instrument(span!(Level::INFO, "", " Genesis initialization "))
+                    .await?;
+
+                    if written_genesis || modified_config {
+                        txn.commit().await?;
+                    }
                 }
-                .instrument(span!(Level::INFO, "", " Genesis initialization "))
-                .await?;
 
                 let sentry_status_provider = SentryStatusProvider::new(chain_config.clone());
                 // staged sync setup
@@ -670,7 +732,7 @@ fn main() -> anyhow::Result<()> {
                 staged_sync.push(SenderRecovery {
                     batch_size: opt.sender_recovery_batch_size.try_into().unwrap(),
                 });
-                staged_sync.push(Execution {
+                let execution_config = ExecutionConfig {
                     batch_size: opt.execution_batch_size.saturating_mul(1_000_000_000_u64),
                     history_batch_size: opt
                         .execution_history_batch_size
@@ -679,9 +741,23 @@ fn main() -> anyhow::Result<()> {
                     batch_until: None,
                     commit_every: None,
                     prune_from: BlockNumber(0),
-                });
-                staged_sync.push(HashState::new(etl_temp_dir.clone(), None));
-                staged_sync.push(Interhashes::new(etl_temp_dir.clone(), None));
+                };
+                match opt.compact {
+                    CompactMode::Off => {
+                        staged_sync.push(Execution::<PlainState>::new(execution_config));
+                        staged_sync.push(HashState::new(etl_temp_dir.clone(), None));
+                        staged_sync
+                            .push(Interhashes::<PlainState>::new(etl_temp_dir.clone(), None));
+                    }
+                    CompactMode::On => {
+                        staged_sync.push(Execution::<HashedState>::new(execution_config));
+                        staged_sync
+                            .push(Interhashes::<HashedState>::new(etl_temp_dir.clone(), None));
+                    }
+                    CompactMode::Ultra => {
+                        staged_sync.push(Execution::<PlainState>::new(execution_config));
+                    }
+                }
                 staged_sync.push(CallTraceIndex {
                     temp_dir: etl_temp_dir.clone(),
                     flush_interval: 50_000,

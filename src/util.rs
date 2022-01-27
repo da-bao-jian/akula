@@ -103,11 +103,18 @@ pub mod hexbytes {
 
 pub fn version_string() -> String {
     format!(
-        "akula/v{}-{}-{}-{}/{}/rustc{}",
+        "v{}-{}-{}-{}",
         env!("VERGEN_BUILD_SEMVER"),
         env!("VERGEN_GIT_BRANCH"),
         env!("VERGEN_GIT_SHA_SHORT"),
         env!("VERGEN_GIT_COMMIT_DATE"),
+    )
+}
+
+pub fn client_id() -> String {
+    format!(
+        "akula/{}/{}/rustc{}",
+        version_string(),
         env!("VERGEN_CARGO_TARGET_TRIPLE"),
         env!("VERGEN_RUSTC_SEMVER")
     )

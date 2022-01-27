@@ -13,7 +13,7 @@ mod tx_lookup;
 pub use block_hashes::BlockHashes;
 pub use call_trace_index::CallTraceIndex;
 pub use downloader::HeaderDownload;
-pub use execution::Execution;
+pub use execution::{Execution, ExecutionConfig};
 pub use hashstate::{promote_clean_accounts, promote_clean_storage, HashState};
 pub use interhashes::Interhashes;
 pub use sender_recovery::SenderRecovery;

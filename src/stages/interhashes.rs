@@ -1,6 +1,6 @@
 use crate::{
-    accessors,
-    kv::{tables, traits::MutableTransaction},
+    accessors::{self, state::StateStorageKind},
+    kv::{tables, traits::*},
     models::*,
     stagedsync::{
         stage::{ExecOutput, Stage, StageInput, UnwindInput, UnwindOutput},
@@ -12,30 +12,36 @@ use crate::{
 };
 use anyhow::{format_err, Context};
 use async_trait::async_trait;
-use std::{cmp, sync::Arc};
+use std::{cmp, marker::PhantomData, sync::Arc};
 use tempfile::TempDir;
 use tracing::info;
 
 /// Generation of intermediate hashes for efficient computation of the state trie root
 #[derive(Debug)]
-pub struct Interhashes {
+pub struct Interhashes<S> {
     temp_dir: Arc<TempDir>,
     clean_promotion_threshold: u64,
+    _marker: PhantomData<S>,
 }
 
-impl Interhashes {
+impl<S> Interhashes<S> {
     pub fn new(temp_dir: Arc<TempDir>, clean_promotion_threshold: Option<u64>) -> Self {
         Self {
             temp_dir,
             clean_promotion_threshold: clean_promotion_threshold.unwrap_or(1_000_000_000_000),
+            _marker: PhantomData,
         }
     }
 }
 
 #[async_trait]
-impl<'db, RwTx> Stage<'db, RwTx> for Interhashes
+impl<'db, RwTx, S> Stage<'db, RwTx> for Interhashes<S>
 where
     RwTx: MutableTransaction<'db>,
+    S: StateStorageKind,
+    tables::BitmapKey<S::Address>: TableObject,
+    tables::BitmapKey<(S::Address, S::Location)>: TableObject,
+    tables::StorageChangeKey<S::Address>: TableObject,
 {
     fn id(&self) -> StageId {
         INTERMEDIATE_HASHES
@@ -81,7 +87,7 @@ where
                     .await
                     .with_context(|| "Failed to generate interhashes")?
             } else {
-                increment_intermediate_hashes(
+                increment_intermediate_hashes::<_, S>(
                     tx,
                     self.temp_dir.as_ref(),
                     past_progress,

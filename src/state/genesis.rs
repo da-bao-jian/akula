@@ -1,4 +1,5 @@
 use crate::{
+    accessors::state::StateStorageKind,
     kv::{tables, traits::*},
     models::*,
     state::*,
@@ -59,20 +60,23 @@ impl GenesisState {
     }
 }
 
-pub async fn initialize_genesis<'db, Tx>(
+pub async fn initialize_genesis<'db, Tx, S>(
     txn: &Tx,
     etl_temp_dir: &TempDir,
     chainspec: ChainSpec,
 ) -> anyhow::Result<bool>
 where
     Tx: MutableTransaction<'db>,
+    S: StateStorageKind,
+    tables::BitmapKey<S::Address>: TableObject,
+    tables::BitmapKey<(S::Address, S::Location)>: TableObject,
 {
     let genesis = chainspec.genesis.number;
     if txn.get(tables::CanonicalHeader, genesis).await?.is_some() {
         return Ok(false);
     }
 
-    let mut state_buffer = Buffer::new(txn, genesis, None);
+    let mut state_buffer = Buffer::<_, S>::new(txn, genesis, None);
     state_buffer.begin_block(genesis);
     // Allocate accounts
     if let Some(balances) = chainspec.balances.get(&genesis) {
@@ -90,8 +94,10 @@ where
 
     state_buffer.write_to_db().await?;
 
-    crate::stages::promote_clean_accounts(txn, etl_temp_dir).await?;
-    crate::stages::promote_clean_storage(txn, etl_temp_dir).await?;
+    if !S::HASHED {
+        crate::stages::promote_clean_accounts(txn, etl_temp_dir).await?;
+        crate::stages::promote_clean_storage(txn, etl_temp_dir).await?;
+    }
     let state_root = crate::trie::regenerate_intermediate_hashes(txn, etl_temp_dir, None).await?;
 
     let header = BlockHeader {
@@ -152,7 +158,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::new_mem_database;
+    use crate::{accessors::state::PlainState, kv::new_mem_database};
     use hex_literal::hex;
 
     fn genesis_header_hash(chain_spec: &'static ChainSpec) -> H256 {
@@ -184,11 +190,13 @@ mod tests {
         let tx = db.begin_mutable().await.unwrap();
 
         let temp_dir = TempDir::new().unwrap();
-        assert!(
-            initialize_genesis(&tx, &temp_dir, crate::res::chainspec::MAINNET.clone())
-                .await
-                .unwrap()
-        );
+        assert!(initialize_genesis::<_, PlainState>(
+            &tx,
+            &temp_dir,
+            crate::res::chainspec::MAINNET.clone()
+        )
+        .await
+        .unwrap());
 
         let genesis_hash = tx
             .get(tables::CanonicalHeader, 0.into())

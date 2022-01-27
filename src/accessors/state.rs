@@ -4,7 +4,10 @@ use crate::{
     models::*,
     u256_to_h256,
 };
-use std::{fmt::Debug, hash::Hash};
+use std::{
+    fmt::{Debug, Display},
+    hash::Hash,
+};
 
 pub trait StateStorageKind: Debug + Send + Sync + 'static
 // https://github.com/rust-lang/rust/issues/20671
@@ -14,18 +17,22 @@ where
 {
     const HASHED: bool;
 
-    type Address: Copy + Debug + PartialEq + Hash + Ord + TableObject;
-    type Location: Copy + Debug + PartialEq + Hash + Ord + TableObject;
+    type Address: Copy + Debug + Display + PartialEq + Hash + Ord + AsRef<[u8]> + TableObject;
+    type Location: Copy + Debug + Display + PartialEq + Hash + Ord + AsRef<[u8]> + TableObject;
 
     type AccountTable: Table<Key = Self::Address, Value = Account>;
     type StorageTable: Table<Key = Self::Address, Value = (Self::Location, U256)>
         + DupSort<SeekBothKey = Self::Location>;
 
-    type AccountChangeTable: Table<Key = tables::AccountChangeKey, Value = tables::AccountChange<Self::Address>>
-        + DupSort<SeekBothKey = Self::Address>;
+    type AccountChangeTable: Table<
+            Key = tables::AccountChangeKey,
+            Value = tables::AccountChange<Self::Address>,
+            SeekKey = BlockNumber,
+        > + DupSort<SeekBothKey = Self::Address>;
     type StorageChangeTable: Table<
             Key = tables::StorageChangeKey<Self::Address>,
             Value = tables::StorageChange<Self::Location>,
+            SeekKey = BlockNumber,
         > + DupSort<SeekBothKey = Self::Location>;
 
     type AccountHistoryIndexTable: Table<
@@ -41,6 +48,9 @@ where
 
     fn address_to_key(address: Address) -> Self::Address;
     fn location_to_key(location: U256) -> Self::Location;
+
+    fn hashed_address_key(v: Self::Address) -> H256;
+    fn hashed_location_key(v: Self::Location) -> H256;
 
     fn account_table() -> Self::AccountTable;
     fn storage_table() -> Self::StorageTable;
@@ -75,6 +85,13 @@ impl StateStorageKind for PlainState {
     }
     fn location_to_key(location: U256) -> Self::Location {
         u256_to_h256(location)
+    }
+
+    fn hashed_address_key(address: Self::Address) -> H256 {
+        keccak256(address)
+    }
+    fn hashed_location_key(location: Self::Location) -> H256 {
+        keccak256(location)
     }
 
     fn account_table() -> Self::AccountTable {
@@ -122,6 +139,13 @@ impl StateStorageKind for HashedState {
     }
     fn location_to_key(location: U256) -> Self::Location {
         keccak256(u256_to_h256(location))
+    }
+
+    fn hashed_address_key(address: Self::Address) -> H256 {
+        address
+    }
+    fn hashed_location_key(location: Self::Location) -> H256 {
+        location
     }
 
     fn account_table() -> Self::AccountTable {

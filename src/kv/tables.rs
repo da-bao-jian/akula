@@ -10,7 +10,7 @@ use maplit::hashmap;
 use modular_bitfield::prelude::*;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, *};
-use std::{collections::HashMap, fmt::Display, sync::Arc};
+use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
 
 #[derive(Debug)]
 pub struct ErasedTable<T>(pub T)
@@ -868,6 +868,34 @@ impl TableDecode for CallTraceSetEntry {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, parity_scale_codec::Encode, parity_scale_codec::Decode)]
+pub enum CompactMode {
+    Off,
+    On,
+    Ultra,
+}
+
+impl FromStr for CompactMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match &*s.to_lowercase() {
+            "off" => Self::Off,
+            "on" => Self::On,
+            "ultra" => Self::Ultra,
+            other => bail!("Invalid compact mode: {}", other),
+        })
+    }
+}
+
+#[derive(Clone, Debug, parity_scale_codec::Encode, parity_scale_codec::Decode)]
+pub struct DatabaseConfig {
+    pub version_string: String,
+    pub compact_mode: CompactMode,
+}
+
+scale_table_object!(DatabaseConfig);
+
 // Plain state tables
 decl_table!(Account => Address => crate::models::Account);
 decl_table!(Storage => Address => (H256, U256));
@@ -887,7 +915,7 @@ decl_table!(HashedStorageHistory => BitmapKey<(H256, H256)> => RoaringTreemap);
 decl_table!(Code => H256 => Bytes);
 decl_table!(TrieAccount => Vec<u8> => Vec<u8>);
 decl_table!(TrieStorage => Vec<u8> => Vec<u8>);
-decl_table!(DbInfo => Vec<u8> => Vec<u8>);
+decl_table!(DbInfo => VariableVec<0> => DatabaseConfig);
 decl_table!(SnapshotInfo => Vec<u8> => Vec<u8>);
 decl_table!(BittorrentInfo => Vec<u8> => Vec<u8>);
 decl_table!(HeaderNumber => H256 => BlockNumber);
