@@ -6,7 +6,7 @@ use akula::{
     binutil::AkulaDataDir,
     consensus::engine_factory,
     execution::{address::create_address, analysis_cache::*, evm::execute, processor::*},
-    kv::{traits::*},
+    kv::traits::*,
     models::*,
     res::chainspec::MAINNET,
     stagedsync::stages::*,
@@ -125,7 +125,6 @@ where
     }
 
     async fn call(&self, call_data: CallData, block_number: BlockNumber) -> RpcResult<Bytes> {
-
         let block_hash = canonical_hash::read(&self.db.begin().await?, block_number)
             .await?
             .unwrap();
@@ -153,7 +152,7 @@ where
             None => Default::default(),
             Some(s) => s,
         };
-        
+
         let msg_with_sender = MessageWithSender {
             message: Message::Legacy {
                 chain_id: Some(ChainId(1)),
@@ -186,7 +185,6 @@ where
     }
 
     async fn estimate_gas(&self, call_data: CallData, block_number: BlockNumber) -> RpcResult<U64> {
-
         let block_hash = canonical_hash::read(&self.db.begin().await?, block_number)
             .await?
             .unwrap();
@@ -195,10 +193,14 @@ where
             .await?
             .unwrap();
 
-        let nonce = account::read(&self.db.begin().await?, call_data.from.unwrap(), Some(block_number))
-            .await?
-            .map(|acc| acc.nonce)
-            .unwrap();
+        let nonce = account::read(
+            &self.db.begin().await?,
+            call_data.from.unwrap(),
+            Some(block_number),
+        )
+        .await?
+        .map(|acc| acc.nonce)
+        .unwrap();
 
         let value = match call_data.value {
             None => Default::default(),
@@ -233,9 +235,12 @@ where
             ommers: vec![],
         };
 
-        let header = &PartialHeader::from(header::read(&self.db.begin().await?, block_hash, block_number)
-            .await?
-            .unwrap().clone());
+        let header = &PartialHeader::from(
+            header::read(&self.db.begin().await?, block_hash, block_number)
+                .await?
+                .unwrap()
+                .clone(),
+        );
 
         let tx = &self.db.begin().await?;
 
@@ -263,7 +268,7 @@ where
             account::read(&self.db.begin().await?, address, Some(block_number))
                 .await?
                 .map(|acc| acc.balance)
-                .unwrap()
+                .unwrap(),
         )
     }
 
@@ -276,10 +281,13 @@ where
             .await?
             .unwrap();
 
-        Ok(
-            json_obj::assemble_block(&self.db.begin().await?, block_hash, block_number, full_tx_obj)
-                .await?,
+        Ok(json_obj::assemble_block(
+            &self.db.begin().await?,
+            block_hash,
+            block_number,
+            full_tx_obj,
         )
+        .await?)
     }
 
     async fn get_block_by_number(
@@ -291,10 +299,13 @@ where
             .await?
             .unwrap();
 
-        Ok(
-            json_obj::assemble_block(&self.db.begin().await?, block_hash, block_number, full_tx_obj)
-                .await?,
+        Ok(json_obj::assemble_block(
+            &self.db.begin().await?,
+            block_hash,
+            block_number,
+            full_tx_obj,
         )
+        .await?)
     }
 
     async fn get_block_tx_count_by_hash(&self, block_hash: H256) -> RpcResult<U64> {
@@ -411,7 +422,8 @@ where
         let msgs_with_sender =
             block_body::read_with_senders(&self.db.begin().await?, block_hash, block_number)
                 .await?
-                .unwrap().transactions;
+                .unwrap()
+                .transactions;
 
         let mut index = 0;
         while index < msgs_with_sender.len() {
@@ -428,11 +440,7 @@ where
 
         let tx = &self.db.begin().await?;
 
-        let mut state = Buffer::new(
-            tx,
-            BlockNumber(0),
-            Some(BlockNumber(block_number.0 - 1)),
-        );
+        let mut state = Buffer::new(tx, BlockNumber(0), Some(BlockNumber(block_number.0 - 1)));
 
         let partial_header = &PartialHeader::from(header.clone());
 
