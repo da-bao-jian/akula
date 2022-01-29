@@ -239,7 +239,6 @@ where
             header::read(&self.db.begin().await?, block_hash, block_number)
                 .await?
                 .unwrap()
-                .clone(),
         );
 
         let tx = &self.db.begin().await?;
@@ -430,7 +429,7 @@ where
             if msgs_with_sender[index].hash() == tx_hash {
                 break;
             }
-            index = index + 1;
+            index += 1;
         }
         let msg = &msgs_with_sender[index];
 
@@ -477,7 +476,7 @@ where
                 data: receipt.logs[i].data.clone(),
                 topics: receipt.logs[i].topics.clone(),
             });
-            i = i + 1;
+            i += 1;
         }
 
         let to = match msg.action() {
@@ -650,7 +649,7 @@ pub mod json_obj {
                     msg_hashes.push(jsonrpc::common::Transaction::Full(Box::new(tx)));
                 }
             }
-            index = index + 1;
+            index += 1;
         }
 
         let total_difficulty = td::read(tx, block_hash, block_number).await?.unwrap();
