@@ -36,7 +36,10 @@ pub struct UnwindOutput {
 
 #[async_trait]
 #[auto_impl(&mut, Box)]
-pub trait Stage<'db, RwTx: MutableTransaction<'db>>: Send + Sync + Debug {
+pub trait Stage<'db, RwTx>: Send + Sync + Debug
+where
+    RwTx: MutableTransaction<'db>,
+{
     /// ID of the sync stage. Should not be empty and should be unique. It is recommended to prefix it with reverse domain to avoid clashes (`com.example.my-stage`).
     fn id(&self) -> StageId;
     /// Called when the stage is executed. The main logic of the stage should be here.
