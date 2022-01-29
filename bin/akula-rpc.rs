@@ -238,7 +238,7 @@ where
         let header = &PartialHeader::from(
             header::read(&self.db.begin().await?, block_hash, block_number)
                 .await?
-                .unwrap()
+                .unwrap(),
         );
 
         let tx = &self.db.begin().await?;
