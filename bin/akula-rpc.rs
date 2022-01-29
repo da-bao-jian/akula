@@ -6,7 +6,7 @@ use akula::{
     binutil::AkulaDataDir,
     consensus::engine_factory,
     execution::{address::create_address, analysis_cache::*, evm::execute, processor::*},
-    kv::{tables, traits::*},
+    kv::{traits::*},
     models::*,
     res::chainspec::MAINNET,
     stagedsync::stages::*,
@@ -15,7 +15,8 @@ use akula::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use clap::Parser;
-use ethereum_types::{Address, U256, U64, *};
+use ethereum_types::{Address, U64};
+use ethnum::U256;
 use jsonrpc::common::{CallData, StoragePos, TxIndex, TxLog, TxReceipt, UncleIndex};
 use jsonrpsee::{core::RpcResult, http_server::HttpServerBuilder, proc_macros::rpc};
 use std::{future::pending, net::SocketAddr, sync::Arc};
@@ -124,13 +125,6 @@ where
     }
 
     async fn call(&self, call_data: CallData, block_number: BlockNumber) -> RpcResult<Bytes> {
-        let block_number = self
-            .db
-            .begin()
-            .await?
-            .get(tables::SyncStage, FINISH)
-            .await?
-            .unwrap();
 
         let block_hash = canonical_hash::read(&self.db.begin().await?, block_number)
             .await?
@@ -140,7 +134,8 @@ where
             .await?
             .unwrap();
 
-        let mut state = Buffer::new(&self.db.begin().await?, BlockNumber(0), Some(block_number));
+        let tx = &self.db.begin().await?;
+        let mut state = Buffer::new(tx, BlockNumber(0), Some(block_number));
         let mut analysis_cache = AnalysisCache::default();
         let block_spec = MAINNET.collect_block_spec(block_number);
 
@@ -158,12 +153,12 @@ where
             None => Default::default(),
             Some(s) => s,
         };
-
+        
         let msg_with_sender = MessageWithSender {
             message: Message::Legacy {
                 chain_id: Some(ChainId(1)),
                 nonce: 0,
-                gas_price: U256::from(0),
+                gas_price: Default::default(),
                 gas_limit: 0,
                 action: TransactionAction::Call(call_data.to),
                 value,
@@ -184,20 +179,13 @@ where
             &PartialHeader::from(header.clone()),
             &block_spec,
             &msg_with_sender,
-            gas,
+            gas.0[0],
         )
         .await?
         .output_data)
     }
 
     async fn estimate_gas(&self, call_data: CallData, block_number: BlockNumber) -> RpcResult<U64> {
-        let block_number = self
-            .db
-            .begin()
-            .await?
-            .get(tables::SyncStage, FINISH)
-            .await?
-            .unwrap();
 
         let block_hash = canonical_hash::read(&self.db.begin().await?, block_number)
             .await?
@@ -207,7 +195,7 @@ where
             .await?
             .unwrap();
 
-        let nonce = account::read(&self.db.begin().await?, call_data.from, Some(block_number))
+        let nonce = account::read(&self.db.begin().await?, call_data.from.unwrap(), Some(block_number))
             .await?
             .map(|acc| acc.nonce)
             .unwrap();
@@ -245,13 +233,13 @@ where
             ommers: vec![],
         };
 
-        block.transactions.push(msg);
-
-        let header = header::read(&self.db.begin().await?, block_hash, block_number)
+        let header = &PartialHeader::from(header::read(&self.db.begin().await?, block_hash, block_number)
             .await?
-            .unwrap();
+            .unwrap().clone());
 
-        let mut state = Buffer::new(&self.db.begin().await?, BlockNumber(0), Some(block_number));
+        let tx = &self.db.begin().await?;
+
+        let mut state = Buffer::new(tx, BlockNumber(0), Some(block_number));
         let mut analysis_cache = AnalysisCache::default();
         let mut engine = engine_factory(MAINNET.clone()).unwrap();
         let block_spec = MAINNET.collect_block_spec(block_number);
@@ -260,7 +248,7 @@ where
             None,
             &mut analysis_cache,
             &mut *engine,
-            &PartialHeader::from(header.clone()),
+            header,
             &block,
             &block_spec,
         );
@@ -275,7 +263,7 @@ where
             account::read(&self.db.begin().await?, address, Some(block_number))
                 .await?
                 .map(|acc| acc.balance)
-                .unwrap_or_else(U256::zero),
+                .unwrap()
         )
     }
 
@@ -289,7 +277,7 @@ where
             .unwrap();
 
         Ok(
-            json_obj::assemble_block(&self.db.begin().await?, block_hash, block_number, true)
+            json_obj::assemble_block(&self.db.begin().await?, block_hash, block_number, full_tx_obj)
                 .await?,
         )
     }
@@ -304,7 +292,7 @@ where
             .unwrap();
 
         Ok(
-            json_obj::assemble_block(&self.db.begin().await?, block_hash, block_number, true)
+            json_obj::assemble_block(&self.db.begin().await?, block_hash, block_number, full_tx_obj)
                 .await?,
         )
     }
@@ -420,11 +408,10 @@ where
             .await?
             .unwrap();
 
-        let block =
+        let msgs_with_sender =
             block_body::read_with_senders(&self.db.begin().await?, block_hash, block_number)
                 .await?
-                .unwrap();
-        let msgs_with_sender = block.transactions;
+                .unwrap().transactions;
 
         let mut index = 0;
         while index < msgs_with_sender.len() {
@@ -433,17 +420,27 @@ where
             }
             index = index + 1;
         }
-        let msg = msgs_with_sender[index];
+        let msg = &msgs_with_sender[index];
 
         let header = header::read(&self.db.begin().await?, block_hash, block_number)
             .await?
             .unwrap();
 
+        let tx = &self.db.begin().await?;
+
         let mut state = Buffer::new(
-            &self.db.begin().await?,
+            tx,
             BlockNumber(0),
             Some(BlockNumber(block_number.0 - 1)),
         );
+
+        let partial_header = &PartialHeader::from(header.clone());
+
+        let block =
+            block_body::read_with_senders(&self.db.begin().await?, block_hash, block_number)
+                .await?
+                .unwrap();
+
         let mut analysis_cache = AnalysisCache::default();
         let mut engine = engine_factory(MAINNET.clone()).unwrap();
         let block_spec = MAINNET.collect_block_spec(block_number);
@@ -452,13 +449,12 @@ where
             None,
             &mut analysis_cache,
             &mut *engine,
-            &PartialHeader::from(header.clone()),
+            partial_header,
             &block,
             &block_spec,
         );
 
-        let receipts = processor.execute_block_no_post_validation().await?;
-        let receipt = receipts[index];
+        let receipt = processor.execute_block_no_post_validation().await?[index].clone();
 
         let mut logs: Vec<TxLog> = Vec::new();
         let mut i = 0;
@@ -470,8 +466,8 @@ where
                 block_hash: Some(block_hash),
                 block_number: Some(U64::from(block_number.0)),
                 address: receipt.logs[i].address,
-                data: receipt.logs[i].data,
-                topics: receipt.logs[i].topics,
+                data: receipt.logs[i].data.clone(),
+                topics: receipt.logs[i].topics.clone(),
             });
             i = i + 1;
         }
